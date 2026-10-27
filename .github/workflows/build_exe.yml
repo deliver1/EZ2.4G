@@ -1,0 +1,36 @@
+name: Package Python Exe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyInstaller
+        run: |
+          pip install pyinstaller
+
+      - name: Build Single Exe
+        run: |
+          pyinstaller -F -w -i app.ico my_devices.py -n "DareuAE6V2Tray"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: "达尔优 AE6 V2 托盘独立版"
+          files: dist/DareuAE6V2Tray.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
