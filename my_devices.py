@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-外设电量 — Windows 10/11 无线外设电量托盘工具
-已集成：达尔优 AE6 V2 无线鼠标 WebHID 原厂驱动协议
+外设电量 — 达尔优 AE6 V2 专用诊断版（自动生成桌面排查日志）
 """
 from __future__ import annotations
 
@@ -19,15 +18,11 @@ from typing import Optional
 
 UI_SCALE = 1.0
 
-# ===========================================================================
-# Win32 基础 API
-# ===========================================================================
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
 hid = ctypes.WinDLL("hid", use_last_error=True)
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 
 INVALID_HANDLE_VALUE = wt.HANDLE(-1).value
@@ -40,33 +35,24 @@ ERROR_IO_PENDING = 997
 WAIT_TIMEOUT = 0x102
 
 kernel32.CreateFileW.restype = wt.HANDLE
-kernel32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
-                                 wt.DWORD, wt.DWORD, wt.HANDLE]
+kernel32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
 kernel32.CloseHandle.argtypes = [wt.HANDLE]
-kernel32.WriteFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD,
-                               ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
-kernel32.ReadFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD,
-                              ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
+kernel32.WriteFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
+kernel32.ReadFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
 kernel32.CreateEventW.restype = wt.HANDLE
 kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.BOOL, wt.LPCWSTR]
 kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
-kernel32.GetOverlappedResult.argtypes = [wt.HANDLE, ctypes.c_void_p,
-                                         ctypes.POINTER(wt.DWORD), wt.BOOL]
+kernel32.GetOverlappedResult.argtypes = [wt.HANDLE, ctypes.c_void_p, ctypes.POINTER(wt.DWORD), wt.BOOL]
 kernel32.CancelIoEx.argtypes = [wt.HANDLE, ctypes.c_void_p]
 kernel32.GetModuleHandleW.restype = wt.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
 
 class GUID(ctypes.Structure):
-    _fields_ = [("Data1", wt.DWORD), ("Data2", wt.WORD), ("Data3", wt.WORD),
-                ("Data4", ctypes.c_ubyte * 8)]
-
+    _fields_ = [("Data1", wt.DWORD), ("Data2", wt.WORD), ("Data3", wt.WORD), ("Data4", ctypes.c_ubyte * 8)]
     def __init__(self, s: str = ""):
         super().__init__()
-        self.parse(s or "{00000000-0000-0000-0000-000000000000}")
-
-    def parse(self, s: str):
-        s = s.strip().strip("{}")
+        s = (s or "{00000000-0000-0000-0000-000000000000}").strip().strip("{}")
         parts = s.split("-", 3)
         self.Data1 = int(parts[0], 16)
         self.Data2 = int(parts[1], 16)
@@ -76,51 +62,35 @@ class GUID(ctypes.Structure):
             self.Data4[i] = rest[i]
 
 class HIDD_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [("Size", wt.ULONG), ("VendorID", wt.USHORT),
-                ("ProductID", wt.USHORT), ("VersionNumber", wt.USHORT)]
+    _fields_ = [("Size", wt.ULONG), ("VendorID", wt.USHORT), ("ProductID", wt.USHORT), ("VersionNumber", wt.USHORT)]
 
 class HIDP_CAPS(ctypes.Structure):
     _fields_ = [
         ("Usage", wt.USHORT), ("UsagePage", wt.USHORT),
-        ("InputReportByteLength", wt.USHORT),
-        ("OutputReportByteLength", wt.USHORT),
-        ("FeatureReportByteLength", wt.USHORT),
-        ("Reserved", wt.USHORT * 17),
-        ("NumberLinkCollectionNodes", wt.USHORT),
-        ("NumberInputButtonCaps", wt.USHORT),
-        ("NumberInputValueCaps", wt.USHORT),
-        ("NumberInputDataIndices", wt.USHORT),
-        ("NumberOutputButtonCaps", wt.USHORT),
-        ("NumberOutputValueCaps", wt.USHORT),
-        ("NumberOutputDataIndices", wt.USHORT),
-        ("NumberFeatureButtonCaps", wt.USHORT),
-        ("NumberFeatureValueCaps", wt.USHORT),
-        ("NumberFeatureDataIndices", wt.USHORT),
+        ("InputReportByteLength", wt.USHORT), ("OutputReportByteLength", wt.USHORT),
+        ("FeatureReportByteLength", wt.USHORT), ("Reserved", wt.USHORT * 17),
+        ("NumberLinkCollectionNodes", wt.USHORT), ("NumberInputButtonCaps", wt.USHORT),
+        ("NumberInputValueCaps", wt.USHORT), ("NumberInputDataIndices", wt.USHORT),
+        ("NumberOutputButtonCaps", wt.USHORT), ("NumberOutputValueCaps", wt.USHORT),
+        ("NumberOutputDataIndices", wt.USHORT), ("NumberFeatureButtonCaps", wt.USHORT),
+        ("NumberFeatureValueCaps", wt.USHORT), ("NumberFeatureDataIndices", wt.USHORT),
     ]
 
 class SP_DEVICE_INTERFACE_DATA(ctypes.Structure):
-    _fields_ = [("cbSize", wt.DWORD), ("InterfaceClassGuid", GUID),
-                ("Flags", wt.DWORD), ("Reserved", ctypes.c_void_p)]
+    _fields_ = [("cbSize", wt.DWORD), ("InterfaceClassGuid", GUID), ("Flags", wt.DWORD), ("Reserved", ctypes.c_void_p)]
 
 setupapi.SetupDiGetClassDevsW.restype = wt.HANDLE
 setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(GUID), wt.LPCWSTR, wt.HWND, wt.DWORD]
-setupapi.SetupDiEnumDeviceInterfaces.argtypes = [
-    wt.HANDLE, ctypes.c_void_p, ctypes.POINTER(GUID), wt.DWORD,
-    ctypes.POINTER(SP_DEVICE_INTERFACE_DATA)]
-setupapi.SetupDiGetDeviceInterfaceDetailW.argtypes = [
-    wt.HANDLE, ctypes.POINTER(SP_DEVICE_INTERFACE_DATA), ctypes.c_void_p,
-    wt.DWORD, ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
+setupapi.SetupDiEnumDeviceInterfaces.argtypes = [wt.HANDLE, ctypes.c_void_p, ctypes.POINTER(GUID), wt.DWORD, ctypes.POINTER(SP_DEVICE_INTERFACE_DATA)]
+setupapi.SetupDiGetDeviceInterfaceDetailW.argtypes = [wt.HANDLE, ctypes.POINTER(SP_DEVICE_INTERFACE_DATA), ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
 setupapi.SetupDiDestroyDeviceInfoList.argtypes = [wt.HANDLE]
 
 hid.HidD_GetAttributes.argtypes = [wt.HANDLE, ctypes.POINTER(HIDD_ATTRIBUTES)]
 hid.HidD_GetPreparsedData.argtypes = [wt.HANDLE, ctypes.POINTER(ctypes.c_void_p)]
 hid.HidD_FreePreparsedData.argtypes = [ctypes.c_void_p]
 hid.HidP_GetCaps.argtypes = [ctypes.c_void_p, ctypes.POINTER(HIDP_CAPS)]
-hid.HidD_GetProductString.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.ULONG]
 
 GUID_DEVINTERFACE_HID = GUID("{4D1E55B2-F16F-11CF-88CB-001111000030}")
-DIGCF_PRESENT = 0x02
-DIGCF_DEVICEINTERFACE = 0x10
 
 @dataclasses.dataclass
 class HidIface:
@@ -131,18 +101,13 @@ class HidIface:
     usage: int
     input_len: int
     output_len: int
-    feature_len: int
-    product: str = ""
 
 def _open_path(path: str, access: int, overlapped: bool = False) -> int:
     flags = FILE_FLAG_OVERLAPPED if overlapped else 0
-    return kernel32.CreateFileW(path, access, FILE_SHARE_RW, None,
-                                OPEN_EXISTING, flags, None)
+    return kernel32.CreateFileW(path, access, FILE_SHARE_RW, None, OPEN_EXISTING, flags, None)
 
 def enumerate_hid() -> list[HidIface]:
-    hdev = setupapi.SetupDiGetClassDevsW(
-        ctypes.byref(GUID_DEVINTERFACE_HID), None, None,
-        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
+    hdev = setupapi.SetupDiGetClassDevsW(ctypes.byref(GUID_DEVINTERFACE_HID), None, None, 0x12)
     if hdev == INVALID_HANDLE_VALUE or not hdev:
         return []
     out: list[HidIface] = []
@@ -151,24 +116,18 @@ def enumerate_hid() -> list[HidIface]:
         while True:
             did = SP_DEVICE_INTERFACE_DATA()
             did.cbSize = ctypes.sizeof(did)
-            if not setupapi.SetupDiEnumDeviceInterfaces(
-                    hdev, None, ctypes.byref(GUID_DEVINTERFACE_HID), idx,
-                    ctypes.byref(did)):
+            if not setupapi.SetupDiEnumDeviceInterfaces(hdev, None, ctypes.byref(GUID_DEVINTERFACE_HID), idx, ctypes.byref(did)):
                 break
             idx += 1
             need = wt.DWORD(0)
-            setupapi.SetupDiGetDeviceInterfaceDetailW(
-                hdev, ctypes.byref(did), None, 0, ctypes.byref(need), None)
+            setupapi.SetupDiGetDeviceInterfaceDetailW(hdev, ctypes.byref(did), None, 0, ctypes.byref(need), None)
             if not need.value:
                 continue
             buf = ctypes.create_string_buffer(need.value)
             ctypes.cast(buf, ctypes.POINTER(wt.DWORD))[0] = 8
-            if not setupapi.SetupDiGetDeviceInterfaceDetailW(
-                    hdev, ctypes.byref(did), buf, need.value,
-                    ctypes.byref(need), None):
+            if not setupapi.SetupDiGetDeviceInterfaceDetailW(hdev, ctypes.byref(did), buf, need.value, ctypes.byref(need), None):
                 continue
             path = ctypes.wstring_at(ctypes.addressof(buf) + 4)
-
             h = _open_path(path, 0)
             if not h or h == INVALID_HANDLE_VALUE:
                 continue
@@ -181,15 +140,11 @@ def enumerate_hid() -> list[HidIface]:
                 if hid.HidD_GetPreparsedData(h, ctypes.byref(pp)):
                     hid.HidP_GetCaps(pp, ctypes.byref(caps))
                     hid.HidD_FreePreparsedData(pp)
-                prod = ctypes.create_unicode_buffer(256)
-                hid.HidD_GetProductString(h, prod, 512)
                 out.append(HidIface(
                     path=path, vid=attrs.VendorID, pid=attrs.ProductID,
                     usage_page=caps.UsagePage, usage=caps.Usage,
                     input_len=caps.InputReportByteLength,
-                    output_len=caps.OutputReportByteLength,
-                    feature_len=caps.FeatureReportByteLength,
-                    product=prod.value))
+                    output_len=caps.OutputReportByteLength))
             finally:
                 kernel32.CloseHandle(h)
     finally:
@@ -197,9 +152,7 @@ def enumerate_hid() -> list[HidIface]:
     return out
 
 class OVERLAPPED(ctypes.Structure):
-    _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
-                ("Offset", wt.DWORD), ("OffsetHigh", wt.DWORD),
-                ("hEvent", wt.HANDLE)]
+    _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p), ("Offset", wt.DWORD), ("OffsetHigh", wt.DWORD), ("hEvent", wt.HANDLE)]
 
 class HidDevice:
     def __init__(self, path: str, write: bool = False):
@@ -209,9 +162,9 @@ class HidDevice:
         self.rh = _open_path(path, GENERIC_READ, overlapped=True)
 
     def close(self):
-        for h in (self.rh, self.h):
-            if h and h != INVALID_HANDLE_VALUE:
-                kernel32.CloseHandle(h)
+        for handle in (self.rh, self.h):
+            if handle and handle != INVALID_HANDLE_VALUE:
+                kernel32.CloseHandle(handle)
         self.rh = 0
         self.h = 0
 
@@ -253,67 +206,81 @@ class Reading:
     source: str = ""
     detail: str = ""
     name: str = ""
-    raw: bytes = b""
     ts: float = dataclasses.field(default_factory=time.time)
     present: bool = True
-    stale: bool = False
     vid: int = 0
     pid: int = 0
 
-STATUS_TEXT = {"charging": "充电中 ⚡", "discharging": "放电中",
-               "full": "已充满 ⚡", "wired": "有线直连 ⚡", "unknown": "使用中"}
+STATUS_TEXT = {"charging": "充电中 ⚡", "discharging": "放电中", "full": "已充满 ⚡", "wired": "有线直连 ⚡", "unknown": "使用中"}
+
+# 全局诊断日志缓冲
+DIAG_LOGS = []
+
+def log_diag(msg: str):
+    global DIAG_LOGS
+    t = time.strftime("%H:%M:%S")
+    DIAG_LOGS.append(f"[{t}] {msg}")
+    if len(DIAG_LOGS) > 60:
+        DIAG_LOGS.pop(0)
 
 # ===========================================================================
-# 达尔优 AE6 V2 专属协议驱动
+# 达尔优通信与原始报文抓取
 # ===========================================================================
 def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
     cands = [d for d in ifaces if d.vid == 0x260D and d.pid in (0x1261, 0x1260, 0x04ED)]
     if not cands:
+        log_diag("未枚举到达尔优设备 (VID: 0x260D)")
         return None
 
+    # 排除系统鼠标指针主通道
     vendors = [d for d in cands if d.usage_page != 0x01] or cands
 
-    for d in vendors:
+    for idx, d in enumerate(vendors):
         dev = None
         try:
             dev = HidDevice(d.path, write=True)
+            # 发送原厂激活/查询帧[cite: 4]
             req = bytes([0x08, 0x01]) + bytes(63)
             dev.write_output(req)
 
-            deadline = time.monotonic() + 0.3
+            deadline = time.monotonic() + 0.35
             while time.monotonic() < deadline:
                 rep = dev.read_input(max(64, d.input_len), 80)
-                if not rep or len(rep) < 4:
+                if not rep or len(rep) < 3:
                     continue
 
-                if rep[0] != 0x08:
-                    continue
+                hex_str = " ".join(f"{b:02X}" for b in rep[:20])
+                log_diag(f"端点[{idx}] PID:0x{d.pid:04X} UP:0x{d.usage_page:04X} 收到 {len(rep)} 字节: {hex_str}")
 
                 bat = -1
                 status = "discharging"
 
-                if rep[2] == 2 or d.pid == 0x1260:
+                # 判定充电/插线
+                if (len(rep) > 2 and rep[2] == 0x02) or d.pid == 0x1260:
                     status = "charging"
 
-                if len(rep) >= 13 and all(b == 255 for b in rep[5:13]):
+                # 判定充满
+                if len(rep) >= 10 and rep[5] == 0xFF and rep[6] == 0xFF:
                     bat = 100
-                    status = "full" if status == "charging" else "discharging"
+                    status = "full"
+                elif len(rep) >= 187 and (rep[10] == 2 or rep[11] == 2):
+                    bat = 100
+                    status = "full"
 
+                # 电量数值匹配
                 if bat == -1:
                     if len(rep) >= 187 and 0 < rep[19] <= 100:
                         bat = rep[19]
-                    elif 0 < rep[3] <= 100:
+                    elif len(rep) > 3 and 0 < rep[3] <= 100:
                         bat = rep[3]
 
                 if bat != -1:
-                    detail_str = "已充满" if bat == 100 else f"电量 {bat}%"
-                    if status in ("charging", "wired"):
-                        detail_str += " · 充电中"
+                    detail_str = "已充满 ⚡" if bat == 100 else f"电量 {bat}%"
                     return Reading(ok=True, level=bat, status=status,
                                    name="达尔优 AE6 V2", source="达尔优协议",
-                                   detail=detail_str, raw=rep, vid=d.vid, pid=d.pid, present=True)
-        except Exception:
-            pass
+                                   detail=detail_str, vid=d.vid, pid=d.pid, present=True)
+        except Exception as e:
+            log_diag(f"端点[{idx}] 读写异常: {e}")
         finally:
             if dev:
                 dev.close()
@@ -324,43 +291,31 @@ def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
 def read_mouse(ifaces: list[HidIface]) -> Reading:
     r_dareu = dareu_read(ifaces)
     if r_dareu:
-        r_dareu.name = "达尔优 AE6 V2"
         return r_dareu
-
-    return Reading(ok=False, name="达尔优 AE6 V2", source="", present=False,
-                   detail="未检测到达尔优无线鼠标")
+    return Reading(ok=False, name="达尔优 AE6 V2", source="", present=False, detail="未检测到达尔优无线鼠标")
 
 # ===========================================================================
-# 基础配置与开机启动
+# 导出排查日志到桌面
 # ===========================================================================
-def startup_lnk() -> str:
-    buf = ctypes.create_unicode_buffer(260)
-    shell32.SHGetFolderPathW(None, 0x0007, None, 0, buf)
-    return os.path.join(buf.value, "DareuAE6V2.lnk")
-
-def startup_enabled() -> bool:
-    return os.path.isfile(startup_lnk())
-
-def install_startup() -> bool:
-    path = startup_lnk()
-    script = os.path.abspath(__file__)
-    exe = sys.executable or ""
-    pythonw = exe[:-len("python.exe")] + "pythonw.exe" if exe.lower().endswith("python.exe") else exe
-    target = pythonw if os.path.isfile(pythonw) else exe
-    args = f'"{script}"'
-    ps = f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{path}");$s.TargetPath="{target}";$s.Arguments=\'{args}\';$s.WorkingDirectory="{os.path.dirname(script)}";$s.Save()'
-    subprocess.run(["powershell", "-Command", ps], capture_output=True)
-    return os.path.isfile(path)
-
-def remove_startup() -> None:
-    if os.path.isfile(startup_lnk()):
-        try:
-            os.remove(startup_lnk())
-        except Exception:
-            pass
+def export_desktop_log():
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf)
+        desktop = buf.value
+        path = os.path.join(desktop, "dareu_diag.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("=== 达尔优 AE6 V2 通信诊断日志 ===\n")
+            f.write("\n".join(DIAG_LOGS))
+            f.write("\n\n=== 设备列表 ===\n")
+            for d in enumerate_hid():
+                if d.vid == 0x260D:
+                    f.write(f"VID: 0x{d.vid:04X}, PID: 0x{d.pid:04X}, UP: 0x{d.usage_page:04X}, U: 0x{d.usage:04X}, In: {d.input_len}, Out: {d.output_len}\n")
+        subprocess.Popen(["notepad.exe", path])
+    except Exception as e:
+        print("导出失败:", e)
 
 # ===========================================================================
-# 图标绘制（带常态可见边框，杜绝变透明）
+# 图标绘制
 # ===========================================================================
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
@@ -373,9 +328,7 @@ class BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
 
 class ICONINFO(ctypes.Structure):
-    _fields_ = [("fIcon", wt.BOOL), ("xHotspot", wt.DWORD),
-                ("yHotspot", wt.DWORD), ("hbmMask", wt.HBITMAP),
-                ("hbmColor", wt.HBITMAP)]
+    _fields_ = [("fIcon", wt.BOOL), ("xHotspot", wt.DWORD), ("yHotspot", wt.DWORD), ("hbmMask", wt.HBITMAP), ("hbmColor", wt.HBITMAP)]
 
 gdi32.CreateCompatibleDC.restype = wt.HDC
 gdi32.CreateDIBSection.restype = wt.HBITMAP
@@ -419,7 +372,6 @@ def make_battery_icon(level: Optional[int], light: bool, charging: bool = False,
         radius = 12.0 * s
         thick = max(2, int(round(4 * s)))
         
-        # 即使没读到电量，也画一个清晰的浅灰白环，绝不在托盘变透明隐形
         track = (160, 160, 160) if level is None else (95, 98, 105)
         pen_track = _ring_pen(track, thick)
         gdi32.SelectObject(memdc, pen_track)
@@ -494,7 +446,7 @@ def make_battery_icon(level: Optional[int], light: bool, charging: bool = False,
         user32.ReleaseDC(None, hdc_screen)
 
 # ===========================================================================
-# 交互式管理面板
+# 界面管理
 # ===========================================================================
 import tkinter as tk
 
@@ -505,8 +457,7 @@ def _rgb(c):
 
 def round_rect_points(x1, y1, x2, y2, r, steps=10):
     pts = []
-    for cx, cy, a0 in ((x2 - r, y1 + r, -90), (x2 - r, y2 - r, 0),
-                       (x1 + r, y2 - r, 90), (x1 + r, y1 + r, 180)):
+    for cx, cy, a0 in ((x2 - r, y1 + r, -90), (x2 - r, y2 - r, 0), (x1 + r, y2 - r, 90), (x1 + r, y1 + r, 180)):
         for i in range(steps + 1):
             a = (a0 + 90 * i / steps) * 3.141592653589793 / 180
             pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
@@ -539,15 +490,13 @@ class Panel:
         self.root.title("2.4G 外设电量")
         self.root.overrideredirect(True)
         self.root.configure(bg="#1B1B1C")
-        self.cv = tk.Canvas(self.root, width=self.W, height=self.H,
-                            highlightthickness=0, bd=0, bg="#1B1B1C")
+        self.cv = tk.Canvas(self.root, width=self.W, height=self.H, highlightthickness=0, bd=0, bg="#1B1B1C")
         self.cv.pack(fill="both", expand=True)
         self.cv.bind("<Button-1>", self._on_press)
         self.cv.bind("<B1-Motion>", self._on_drag)
         self.cv.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
         self.root.bind("<Escape>", lambda e: self.hide())
         self._drag = None
-        self._startup_var = startup_enabled()
         self.root.update_idletasks()
         set_round_region(self.root.winfo_id(), self.W, self.H, int(28 * self.S))
         self._center()
@@ -564,7 +513,7 @@ class Panel:
         if e.y >= 64 * self.S:
             return
         tags = self.cv.gettags("current")
-        if any(t.startswith(("btn_", "chk_")) for t in tags):
+        if any(t.startswith("btn_") for t in tags):
             return
         self._drag = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y())
 
@@ -600,6 +549,7 @@ class Panel:
         snap = self.app.snapshot()
         r = snap.get("mouse") or Reading(ok=False, name="达尔优 AE6 V2")
 
+        # 鼠标卡片
         x1, y1, x2, y2 = 24, 88, W - 24, 210
         draw_round_rect(cv, x1, y1, x2, y2, 12, fill=_rgb(self.DSH_CARD), outline=_rgb(self.DSH_BORDER), width=1)
 
@@ -642,7 +592,10 @@ class Panel:
         cv.create_text(24, 372, text=f"上次更新: {stamp}", anchor="w", fill=_rgb(self.DSH_MUTED), font=self._f(9), tags=("btn_ref",))
         cv.tag_bind("btn_ref", "<Button-1>", lambda e: self.app.refresh())
 
-        self._check(380, 372, self._startup_var, "开机自启", self._toggle_startup)
+        # 诊断日志导出按钮（点击自动保存到桌面并打开）
+        draw_round_rect(cv, 340, 360, 450, 384, 6, fill=_rgb(self.DSH_BTN), outline="")
+        cv.create_text(395, 372, text="导出排查日志", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_diag",))
+        cv.tag_bind("btn_diag", "<Button-1>", lambda e: export_desktop_log())
 
         draw_round_rect(cv, 472, 360, 536, 384, 6, fill=_rgb(self.DSH_BTN), outline="")
         cv.create_text(504, 372, text="退出", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_quit",))
@@ -650,26 +603,8 @@ class Panel:
 
         cv.scale("all", 0, 0, self.S, self.S)
 
-    def _check(self, x, y, checked, label, cmd):
-        tag = f"chk_{label}"
-        fill = self.DSH_BTN if checked else self.DSH_BG
-        border = self.DSH_BTN if checked else self.DSH_BORDER
-        draw_round_rect(self.cv, x, y - 6, x + 12, y + 6, 3.5, fill=_rgb(fill), outline=_rgb(border), width=1, tags=(tag,))
-        if checked:
-            self.cv.create_line(x + 3, y + 1, x + 5.5, y + 3.5, x + 9.5, y - 3, fill=_rgb(self.DSH_TEXT), width=2, tags=(tag,))
-        self.cv.create_text(x + 20, y, text=label, fill=_rgb(self.DSH_SUB), font=self._f(9), tags=(tag,), anchor="w")
-        self.cv.tag_bind(tag, "<Button-1>", lambda e: cmd())
-
-    def _toggle_startup(self):
-        if self._startup_var:
-            remove_startup()
-            self._startup_var = False
-        else:
-            self._startup_var = install_startup()
-        self.render()
-
 # ===========================================================================
-# 托盘调度
+# 托盘调度与消息循环
 # ===========================================================================
 WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
@@ -679,13 +614,6 @@ WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
-
-NIM_ADD = 0
-NIM_MODIFY = 1
-NIM_DELETE = 2
-NIF_MESSAGE = 1
-NIF_ICON = 2
-NIF_TIP = 4
 
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 
@@ -733,11 +661,11 @@ class Tray:
         self.nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
         self.nid.hWnd = self.hwnd
         self.nid.uID = 1
-        self.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        self.nid.uFlags = 1 | 2 | 4
         self.nid.uCallbackMessage = WM_TRAYICON
         self.nid.hIcon = make_battery_icon(-1, False, False)
         self.nid.szTip = "达尔优 AE6 V2: 侦测中..."
-        shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(self.nid))
+        shell32.Shell_NotifyIconW(0, ctypes.byref(self.nid))
 
         user32.SetTimer(self.hwnd, 1, 3000, None)
 
@@ -757,7 +685,7 @@ class Tray:
             self.nid.hIcon = icon
             tip = f"达尔优 AE6 V2: {r.level}%\n{STATUS_TEXT.get(r.status, '使用中')}" if (r and r.ok) else "达尔优 AE6 V2: 未连接"
             self.nid.szTip = tip[:127]
-            shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self.nid))
+            shell32.Shell_NotifyIconW(1, ctypes.byref(self.nid))
 
         if self.cur_icon:
             user32.DestroyIcon(self.cur_icon)
@@ -765,7 +693,7 @@ class Tray:
 
     def destroy(self):
         if self.nid:
-            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self.nid))
+            shell32.Shell_NotifyIconW(2, ctypes.byref(self.nid))
         if self.cur_icon:
             user32.DestroyIcon(self.cur_icon)
 
@@ -791,7 +719,7 @@ class Tray:
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
 # ===========================================================================
-# 应用程序核心编排
+# 应用程序核心
 # ===========================================================================
 class TrayApp:
     def __init__(self):
@@ -850,8 +778,6 @@ class TrayApp:
         self.tray = Tray(self)
         self.tray.start()
         self.refresh()
-
-        # 启动时自动展示一次面板，方便直观确认已正常运行
         self.panel.show()
 
         def tick():
