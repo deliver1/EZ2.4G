@@ -2,30 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 外设电量 — Windows 10/11 无线外设电量托盘工具
-纯标准库 + ctypes + tkinter，零第三方依赖
 已集成：达尔优 AE6 V2 无线鼠标 WebHID 原厂驱动协议
 """
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
-import ctypes.wintypes as w
 import dataclasses
-import json
 import math
 import os
-import struct
 import subprocess
 import sys
-import tempfile
-import queue
-import random
 import threading
 import time
 from typing import Optional
 
 UI_SCALE = 1.0
-
 
 # ===========================================================================
 # Win32 基础 API
@@ -37,9 +29,6 @@ hid = ctypes.WinDLL("hid", use_last_error=True)
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-ole32 = ctypes.WinDLL("ole32", use_last_error=True)
-dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
-imm32 = ctypes.WinDLL("imm32", use_last_error=True)
 
 INVALID_HANDLE_VALUE = wt.HANDLE(-1).value
 GENERIC_READ = 0x80000000
@@ -48,7 +37,6 @@ FILE_SHARE_RW = 0x00000001 | 0x00000002
 OPEN_EXISTING = 3
 FILE_FLAG_OVERLAPPED = 0x40000000
 ERROR_IO_PENDING = 997
-WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 0x102
 
 kernel32.CreateFileW.restype = wt.HANDLE
@@ -65,27 +53,9 @@ kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
 kernel32.GetOverlappedResult.argtypes = [wt.HANDLE, ctypes.c_void_p,
                                          ctypes.POINTER(wt.DWORD), wt.BOOL]
 kernel32.CancelIoEx.argtypes = [wt.HANDLE, ctypes.c_void_p]
-kernel32.ResetEvent.argtypes = [wt.HANDLE]
-user32.SetTimer.argtypes = [wt.HWND, wt.UINT, wt.UINT, ctypes.c_void_p]
-user32.SetTimer.restype = ctypes.c_size_t
-user32.KillTimer.argtypes = [wt.HWND, wt.UINT]
-user32.GetClassLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
-user32.GetClassLongPtrW.restype = ctypes.c_size_t
-user32.SetClassLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_size_t]
-user32.SetClassLongPtrW.restype = ctypes.c_size_t
-dwmapi.DwmSetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD]
 kernel32.GetModuleHandleW.restype = wt.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
-kernel32.CreateMutexW.restype = wt.HANDLE
-kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
-kernel32.GlobalAlloc.restype = wt.HGLOBAL
-kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
-kernel32.GlobalLock.restype = ctypes.c_void_p
-kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
-kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
-kernel32.GlobalFree.argtypes = [wt.HGLOBAL]
-
 
 class GUID(ctypes.Structure):
     _fields_ = [("Data1", wt.DWORD), ("Data2", wt.WORD), ("Data3", wt.WORD),
@@ -105,17 +75,9 @@ class GUID(ctypes.Structure):
         for i in range(8):
             self.Data4[i] = rest[i]
 
-    def as_str(self) -> str:
-        return ("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}"
-                % (self.Data1, self.Data2, self.Data3,
-                   self.Data4[0], self.Data4[1], self.Data4[2], self.Data4[3],
-                   self.Data4[4], self.Data4[5], self.Data4[6], self.Data4[7]))
-
-
 class HIDD_ATTRIBUTES(ctypes.Structure):
     _fields_ = [("Size", wt.ULONG), ("VendorID", wt.USHORT),
                 ("ProductID", wt.USHORT), ("VersionNumber", wt.USHORT)]
-
 
 class HIDP_CAPS(ctypes.Structure):
     _fields_ = [
@@ -136,15 +98,12 @@ class HIDP_CAPS(ctypes.Structure):
         ("NumberFeatureDataIndices", wt.USHORT),
     ]
 
-
 class SP_DEVICE_INTERFACE_DATA(ctypes.Structure):
     _fields_ = [("cbSize", wt.DWORD), ("InterfaceClassGuid", GUID),
                 ("Flags", wt.DWORD), ("Reserved", ctypes.c_void_p)]
 
-
 setupapi.SetupDiGetClassDevsW.restype = wt.HANDLE
-setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(GUID), wt.LPCWSTR,
-                                          wt.HWND, wt.DWORD]
+setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(GUID), wt.LPCWSTR, wt.HWND, wt.DWORD]
 setupapi.SetupDiEnumDeviceInterfaces.argtypes = [
     wt.HANDLE, ctypes.c_void_p, ctypes.POINTER(GUID), wt.DWORD,
     ctypes.POINTER(SP_DEVICE_INTERFACE_DATA)]
@@ -163,10 +122,6 @@ GUID_DEVINTERFACE_HID = GUID("{4D1E55B2-F16F-11CF-88CB-001111000030}")
 DIGCF_PRESENT = 0x02
 DIGCF_DEVICEINTERFACE = 0x10
 
-
-# ===========================================================================
-# HID 枚举与接口抽象
-# ===========================================================================
 @dataclasses.dataclass
 class HidIface:
     path: str
@@ -179,12 +134,10 @@ class HidIface:
     feature_len: int
     product: str = ""
 
-
 def _open_path(path: str, access: int, overlapped: bool = False) -> int:
     flags = FILE_FLAG_OVERLAPPED if overlapped else 0
     return kernel32.CreateFileW(path, access, FILE_SHARE_RW, None,
                                 OPEN_EXISTING, flags, None)
-
 
 def enumerate_hid() -> list[HidIface]:
     hdev = setupapi.SetupDiGetClassDevsW(
@@ -243,12 +196,10 @@ def enumerate_hid() -> list[HidIface]:
         setupapi.SetupDiDestroyDeviceInfoList(hdev)
     return out
 
-
 class OVERLAPPED(ctypes.Structure):
     _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
                 ("Offset", wt.DWORD), ("OffsetHigh", wt.DWORD),
                 ("hEvent", wt.HANDLE)]
-
 
 class HidDevice:
     def __init__(self, path: str, write: bool = False):
@@ -294,7 +245,6 @@ class HidDevice:
         finally:
             kernel32.CloseHandle(ev)
 
-
 @dataclasses.dataclass
 class Reading:
     ok: bool = False
@@ -310,32 +260,23 @@ class Reading:
     vid: int = 0
     pid: int = 0
 
-    @property
-    def text(self) -> str:
-        return f"{self.level}%" if self.ok and self.level is not None else "未连接"
-
-
 STATUS_TEXT = {"charging": "充电中 ⚡", "discharging": "放电中",
                "full": "已充满 ⚡", "wired": "有线直连 ⚡", "unknown": "使用中"}
 
-
 # ===========================================================================
-# 达尔优 AE6 V2 专属协议驱动（原厂抓包匹配）
+# 达尔优 AE6 V2 专属协议驱动
 # ===========================================================================
 def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
-    """达尔优 AE6 V2 原厂 WebHID 协议精准解析"""
     cands = [d for d in ifaces if d.vid == 0x260D and d.pid in (0x1261, 0x1260, 0x04ED)]
     if not cands:
         return None
 
-    # 排除鼠标指针接口 (UsagePage 0x01)
     vendors = [d for d in cands if d.usage_page != 0x01] or cands
 
     for d in vendors:
         dev = None
         try:
             dev = HidDevice(d.path, write=True)
-            # 发送达尔优 ReportID 8 状态触发帧[cite: 4]
             req = bytes([0x08, 0x01]) + bytes(63)
             dev.write_output(req)
 
@@ -351,21 +292,16 @@ def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
                 bat = -1
                 status = "discharging"
 
-                # 1. 状态判断 (Data[2])：2 为插线充电或充满；有线 PID 0x1260 也判定为充电
                 if rep[2] == 2 or d.pid == 0x1260:
                     status = "charging"
 
-                # 2. 检查充满饱和特征：5~12 字节全为 255 (0xFF)[cite: 8]
                 if len(rep) >= 13 and all(b == 255 for b in rep[5:13]):
                     bat = 100
                     status = "full" if status == "charging" else "discharging"
 
-                # 3. 正常工作或充电过程中的电量获取
                 if bat == -1:
-                    # 187 字节长配置帧
                     if len(rep) >= 187 and 0 < rep[19] <= 100:
                         bat = rep[19]
-                    # 16 字节短报文：Data[3] 对应实际百分比或档位
                     elif 0 < rep[3] <= 100:
                         bat = rep[3]
 
@@ -382,10 +318,8 @@ def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
             if dev:
                 dev.close()
 
-    # 无法直接读取电量数值时的真实状态提示
     return Reading(ok=False, name="达尔优 AE6 V2", source="达尔优协议",
                    detail="接收器已连接，等待鼠标唤醒", vid=0x260D, pid=0x1261, present=True)
-
 
 def read_mouse(ifaces: list[HidIface]) -> Reading:
     r_dareu = dareu_read(ifaces)
@@ -396,58 +330,27 @@ def read_mouse(ifaces: list[HidIface]) -> Reading:
     return Reading(ok=False, name="达尔优 AE6 V2", source="", present=False,
                    detail="未检测到达尔优无线鼠标")
 
-
-def read_all(ifaces: Optional[list[HidIface]] = None) -> dict[str, Reading]:
-    ifaces = ifaces if ifaces is not None else enumerate_hid()
-    mouse = read_mouse(ifaces)
-    return {"mouse": mouse}
-
-
 # ===========================================================================
-# 基础配置与自启
+# 基础配置与开机启动
 # ===========================================================================
-def config_dir() -> str:
-    base = os.environ.get("APPDATA") or os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "BatteryTray")
-
-
 def startup_lnk() -> str:
     buf = ctypes.create_unicode_buffer(260)
     shell32.SHGetFolderPathW(None, 0x0007, None, 0, buf)
-    return os.path.join(buf.value, "2.4G.lnk")
-
+    return os.path.join(buf.value, "DareuAE6V2.lnk")
 
 def startup_enabled() -> bool:
     return os.path.isfile(startup_lnk())
 
-
 def install_startup() -> bool:
     path = startup_lnk()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    exe = sys.executable or ""
     script = os.path.abspath(__file__)
-    if getattr(sys, "frozen", False):
-        target, args = os.path.abspath(sys.executable), ""
-    else:
-        pythonw = exe[:-len("python.exe")] + "pythonw.exe" if exe.lower().endswith("python.exe") else exe
-        target, args = (pythonw, f'"{script}"') if os.path.isfile(pythonw) else (exe, f'"{script}"')
-    
-    # 建立快捷方式
-    try:
-        import win32com.client
-        shell = win32com.client.Dispatch("WScript.Shell")
-        shortcut = shell.CreateShortCut(path)
-        shortcut.TargetPath = target
-        shortcut.Arguments = args
-        shortcut.WorkingDirectory = os.path.dirname(script)
-        shortcut.save()
-        return True
-    except Exception:
-        # PowerShell 兜底
-        ps = f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{path}");$s.TargetPath="{target}";$s.Arguments=\'{args}\';$s.WorkingDirectory="{os.path.dirname(script)}";$s.Save()'
-        subprocess.run(["powershell", "-Command", ps], capture_output=True)
-        return os.path.isfile(path)
-
+    exe = sys.executable or ""
+    pythonw = exe[:-len("python.exe")] + "pythonw.exe" if exe.lower().endswith("python.exe") else exe
+    target = pythonw if os.path.isfile(pythonw) else exe
+    args = f'"{script}"'
+    ps = f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{path}");$s.TargetPath="{target}";$s.Arguments=\'{args}\';$s.WorkingDirectory="{os.path.dirname(script)}";$s.Save()'
+    subprocess.run(["powershell", "-Command", ps], capture_output=True)
+    return os.path.isfile(path)
 
 def remove_startup() -> None:
     if os.path.isfile(startup_lnk()):
@@ -456,9 +359,8 @@ def remove_startup() -> None:
         except Exception:
             pass
 
-
 # ===========================================================================
-# 图标渲染（GDI 高精圆环超采样）
+# 图标绘制（带常态可见边框，杜绝变透明）
 # ===========================================================================
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
@@ -467,16 +369,13 @@ class BITMAPINFOHEADER(ctypes.Structure):
                 ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG),
                 ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
 
-
 class BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
-
 
 class ICONINFO(ctypes.Structure):
     _fields_ = [("fIcon", wt.BOOL), ("xHotspot", wt.DWORD),
                 ("yHotspot", wt.DWORD), ("hbmMask", wt.HBITMAP),
                 ("hbmColor", wt.HBITMAP)]
-
 
 gdi32.CreateCompatibleDC.restype = wt.HDC
 gdi32.CreateDIBSection.restype = wt.HBITMAP
@@ -486,16 +385,13 @@ user32.CreateIconIndirect.restype = wt.HICON
 
 COLORREF = lambda r, g, b: (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16)
 
-
 class _LogBrush(ctypes.Structure):
     _fields_ = [("lbStyle", wt.UINT), ("lbColor", wt.COLORREF), ("lbHatch", ctypes.c_void_p)]
-
 
 def _ring_pen(rgb, width: int) -> int:
     lb = _LogBrush(lbStyle=0, lbColor=COLORREF(*rgb), lbHatch=0)
     gdi32.ExtCreatePen.restype = wt.HPEN
     return gdi32.ExtCreatePen(0x00010000 | 0x00000200, width, ctypes.byref(lb), 0, None)
-
 
 def make_battery_icon(level: Optional[int], light: bool, charging: bool = False, size: int = 32) -> int:
     SS = 4
@@ -522,13 +418,15 @@ def make_battery_icon(level: Optional[int], light: bool, charging: bool = False,
         cx = cy = big / 2.0
         radius = 12.0 * s
         thick = max(2, int(round(4 * s)))
-        track = (95, 98, 105) if not light else (175, 180, 188)
+        
+        # 即使没读到电量，也画一个清晰的浅灰白环，绝不在托盘变透明隐形
+        track = (160, 160, 160) if level is None else (95, 98, 105)
         pen_track = _ring_pen(track, thick)
         gdi32.SelectObject(memdc, pen_track)
         gdi32.SelectObject(memdc, gdi32.GetStockObject(5))
         gdi32.Ellipse(memdc, int(cx - radius), int(cy - radius), int(cx + radius), int(cy + radius))
 
-        if level is not None:
+        if level is not None and level >= 0:
             if charging:
                 r, g, b = 34, 197, 94
             elif level >= 60:
@@ -595,7 +493,6 @@ def make_battery_icon(level: Optional[int], light: bool, charging: bool = False,
         gdi32.DeleteDC(memdc)
         user32.ReleaseDC(None, hdc_screen)
 
-
 # ===========================================================================
 # 交互式管理面板
 # ===========================================================================
@@ -603,10 +500,8 @@ import tkinter as tk
 
 FONT = "Microsoft YaHei UI"
 
-
 def _rgb(c):
     return "#%02x%02x%02x" % c
-
 
 def round_rect_points(x1, y1, x2, y2, r, steps=10):
     pts = []
@@ -617,12 +512,10 @@ def round_rect_points(x1, y1, x2, y2, r, steps=10):
             pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
     return pts
 
-
 def draw_round_rect(cv: "tk.Canvas", x1, y1, x2, y2, r, **kw):
     pts = round_rect_points(x1, y1, x2, y2, r)
     flat = [v for p in pts for v in p]
     return cv.create_polygon(flat, smooth=False, **kw)
-
 
 def set_round_region(hwnd: int, w: int, h: int, radius: int = 24) -> None:
     try:
@@ -630,7 +523,6 @@ def set_round_region(hwnd: int, w: int, h: int, radius: int = 24) -> None:
         user32.SetWindowRgn(hwnd, rgn, True)
     except Exception:
         pass
-
 
 class Panel:
     LW, LH = 560, 399
@@ -708,7 +600,6 @@ class Panel:
         snap = self.app.snapshot()
         r = snap.get("mouse") or Reading(ok=False, name="达尔优 AE6 V2")
 
-        # 鼠标卡片
         x1, y1, x2, y2 = 24, 88, W - 24, 210
         draw_round_rect(cv, x1, y1, x2, y2, 12, fill=_rgb(self.DSH_CARD), outline=_rgb(self.DSH_BORDER), width=1)
 
@@ -731,7 +622,6 @@ class Panel:
             cv.create_text(x2 - 24, y1 + 40, text="未连接", anchor="e",
                            fill=_rgb(self.DSH_MUTED), font=self._f(14, True))
 
-        # 电量条底轨与填充
         bx1, bx2 = x1 + 18, x2 - 18
         by = y2 - 24
         draw_round_rect(cv, bx1, by, bx2, by + 6, 3, fill=_rgb(self.DSH_TRACK), outline="")
@@ -740,7 +630,6 @@ class Panel:
             col = (34, 197, 94) if lv > 20 else (239, 68, 68)
             draw_round_rect(cv, bx1, by, bx1 + max(6, w), by + 6, 3, fill=_rgb(col), outline="")
 
-        # 顶栏
         cv.create_text(30, 34, text="外设电量", anchor="w", fill=_rgb(self.DSH_TEXT), font=self._f(16, True))
         cv.create_text(30, 56, text="2.4G 无线外设 · 达尔优 AE6 V2 监控", anchor="w", fill=_rgb(self.DSH_SUB), font=self._f(9))
 
@@ -749,7 +638,6 @@ class Panel:
         cv.tag_bind("btn_close", "<Enter>", lambda e: cv.configure(cursor="hand2"))
         cv.tag_bind("btn_close", "<Leave>", lambda e: cv.configure(cursor=""))
 
-        # 底栏
         stamp = time.strftime("%H:%M:%S", time.localtime(r.ts)) if r.ts else "--:--"
         cv.create_text(24, 372, text=f"上次更新: {stamp}", anchor="w", fill=_rgb(self.DSH_MUTED), font=self._f(9), tags=("btn_ref",))
         cv.tag_bind("btn_ref", "<Button-1>", lambda e: self.app.refresh())
@@ -780,7 +668,6 @@ class Panel:
             self._startup_var = install_startup()
         self.render()
 
-
 # ===========================================================================
 # 托盘调度
 # ===========================================================================
@@ -802,14 +689,12 @@ NIF_TIP = 4
 
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 
-
 class WNDCLASSW(ctypes.Structure):
     _fields_ = [("style", wt.UINT), ("lpfnWndProc", WNDPROC),
                 ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
                 ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
                 ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH),
                 ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
-
 
 class NOTIFYICONDATAW(ctypes.Structure):
     _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT),
@@ -819,7 +704,6 @@ class NOTIFYICONDATAW(ctypes.Structure):
                 ("szInfo", wt.WCHAR * 256), ("uVersion", wt.UINT),
                 ("szInfoTitle", wt.WCHAR * 64), ("dwInfoFlags", wt.DWORD),
                 ("guidItem", GUID), ("hBalloonIcon", wt.HICON)]
-
 
 class Tray:
     CLASS_NAME = "BatteryTrayDareu"
@@ -855,7 +739,7 @@ class Tray:
         self.nid.szTip = "达尔优 AE6 V2: 侦测中..."
         shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(self.nid))
 
-        user32.SetTimer(self.hwnd, 1, 4000, None)
+        user32.SetTimer(self.hwnd, 1, 3000, None)
 
         msg = wt.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -906,13 +790,11 @@ class Tray:
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-
 # ===========================================================================
 # 应用程序核心编排
 # ===========================================================================
 class TrayApp:
-    def __init__(self, panel_only: bool = False):
-        self.panel_only = panel_only
+    def __init__(self):
         self._readings: dict[str, Reading] = {}
         self._lock = threading.Lock()
         self._refreshing = False
@@ -965,10 +847,12 @@ class TrayApp:
     def run(self):
         self.panel = Panel(self)
         self.root = self.panel.root
-        if not self.panel_only:
-            self.tray = Tray(self)
-            self.tray.start()
+        self.tray = Tray(self)
+        self.tray.start()
         self.refresh()
+
+        # 启动时自动展示一次面板，方便直观确认已正常运行
+        self.panel.show()
 
         def tick():
             if self._show_requested:
@@ -980,8 +864,6 @@ class TrayApp:
             self.root.after(200, tick)
 
         self.root.after(200, tick)
-        if self.panel_only:
-            self.panel.show()
         self.root.mainloop()
         try:
             if self.tray:
@@ -990,16 +872,10 @@ class TrayApp:
             pass
         os._exit(0)
 
-
-def main(argv):
+def main():
     user32.SetProcessDPIAware()
-    mutex = kernel32.CreateMutexW(None, False, "Local\\BatteryTrayDareu_Mutex")
-    if ctypes.get_last_error() == 183 and mutex:
-        return 0
-    app = TrayApp(panel_only="--panel" in argv)
+    app = TrayApp()
     app.run()
-    return 0
-
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    main()
