@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-外设电量 — 达尔优 AE6 V2 稳定版
-修复越界 Bug、新增明确的“最小化到托盘”交互
+外设电量 — 达尔优 AE6 V2 终极校准版
+基于原厂 WebHID 控制台抓包：rep[4]=状态(02充电)，rep[5]=电量百分比
 """
 from __future__ import annotations
 
@@ -214,42 +214,29 @@ class Reading:
 
 STATUS_TEXT = {"charging": "充电中 ⚡", "discharging": "放电中", "full": "已充满 ⚡", "wired": "有线直连 ⚡", "unknown": "使用中"}
 
-DIAG_LOGS = []
-
-def log_diag(msg: str):
-    global DIAG_LOGS
-    t = time.strftime("%H:%M:%S")
-    DIAG_LOGS.append(f"[{t}] {msg}")
-    if len(DIAG_LOGS) > 80:
-        DIAG_LOGS.pop(0)
-
 # ===========================================================================
-# 达尔优通信逻辑（17 字节与通用 Report 兼容）
+# 达尔优通信驱动：完全对齐控制台真实字段
 # ===========================================================================
 def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
     cands = [d for d in ifaces if d.vid == 0x260D and d.pid in (0x1261, 0x1260, 0x04ED)]
     if not cands:
         return None
 
-    # 优先使用诊断日志中验证的 17 字节端点 (UP: 0xFF02) 及配置端点 (UP: 0xFF06)
-    target_ifaces = [d for d in cands if d.usage_page in (0xFF02, 0xFF06)]
+    # 锁定 17 字节通道
+    target_ifaces = [d for d in cands if d.usage_page == 0xFF02]
     if not target_ifaces:
         target_ifaces = [d for d in cands if d.usage_page != 0x01] or cands
 
-    for idx, d in enumerate(target_ifaces):
+    for d in target_ifaces:
         dev = None
         try:
             dev = HidDevice(d.path, write=True)
 
-            # 严格根据端点实际 output_len 发送相匹配的数据包，杜绝越界
             out_len = d.output_len if d.output_len > 0 else 17
             req = bytearray(out_len)
             req[0] = 0x08
-            req[1] = 0x01
-
-            # 若为 17 字节端点，追加末尾累加校验[cite: 4]
+            req[1] = 0x04
             if out_len == 17:
-                req[1] = 0x04
                 s = sum(req[:16])
                 req[16] = (0x55 - (s & 0xFF)) & 0xFF
 
@@ -259,39 +246,30 @@ def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
             while time.monotonic() < deadline:
                 in_len = max(d.input_len, 17)
                 rep = dev.read_input(in_len, 80)
-                if not rep or len(rep) < 4:
+                if not rep or len(rep) < 7:
                     continue
 
-                hex_str = " ".join(f"{b:02X}" for b in rep[:min(len(rep), 20)])
-                log_diag(f"端点[{idx}] UP:0x{d.usage_page:04X} 收到: {hex_str}")
+                # 原厂握手校验：ReportId 8, Cmd 4
+                if rep[0] == 0x08 and rep[1] == 0x04:
+                    # 控制台实测：rep[4] 是状态标志，rep[5] 是真实电量
+                    state_flag = rep[4]
+                    bat = rep[5]
 
-                bat = -1
-                status = "discharging"
+                    is_charging = (state_flag == 0x02) or (d.pid == 0x1260)
 
-                # 17 字节规范解析 (08 04 开头)
-                if rep[0] == 0x08 and rep[1] == 0x04 and len(rep) >= 7:
-                    bat = rep[6]
-                    wired = len(rep) > 7 and rep[7] != 0
-                    status = "wired" if wired or d.pid == 0x1260 else "discharging"
+                    if 0 <= bat <= 100:
+                        if is_charging:
+                            status = "full" if bat >= 100 else "charging"
+                            detail_str = "已充满 ⚡" if bat >= 100 else f"电量 {bat}% · 充电中 ⚡"
+                        else:
+                            status = "discharging"
+                            detail_str = f"电量 {bat}% · 放电中"
 
-                # 状态与电量字段解析
-                if bat == -1 and rep[0] == 0x08:
-                    if len(rep) > 2 and rep[2] == 0x02:
-                        status = "charging"
-                    if len(rep) > 3 and 0 < rep[3] <= 100:
-                        bat = rep[3]
-                    elif len(rep) >= 187 and 0 < rep[19] <= 100:
-                        bat = rep[19]
-
-                if 0 <= bat <= 100:
-                    if bat >= 100 and status in ("charging", "wired"):
-                        status = "full"
-                    detail_str = "已充满 ⚡" if bat >= 100 else f"电量 {bat}%"
-                    return Reading(ok=True, level=bat, status=status,
-                                   name="达尔优 AE6 V2", source="达尔优协议",
-                                   detail=detail_str, vid=d.vid, pid=d.pid, present=True)
-        except Exception as e:
-            log_diag(f"端点[{idx}] UP:0x{d.usage_page:04X} 异常: {e}")
+                        return Reading(ok=True, level=bat, status=status,
+                                       name="达尔优 AE6 V2", source="达尔优原厂协议",
+                                       detail=detail_str, vid=d.vid, pid=d.pid, present=True)
+        except Exception:
+            pass
         finally:
             if dev:
                 dev.close()
@@ -306,27 +284,7 @@ def read_mouse(ifaces: list[HidIface]) -> Reading:
     return Reading(ok=False, name="达尔优 AE6 V2", source="", present=False, detail="未检测到达尔优无线鼠标")
 
 # ===========================================================================
-# 诊断日志导出
-# ===========================================================================
-def export_desktop_log():
-    try:
-        buf = ctypes.create_unicode_buffer(260)
-        shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf)
-        desktop = buf.value
-        path = os.path.join(desktop, "dareu_diag.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("=== 达尔优 AE6 V2 通信诊断日志 ===\n")
-            f.write("\n".join(DIAG_LOGS))
-            f.write("\n\n=== 设备列表 ===\n")
-            for d in enumerate_hid():
-                if d.vid == 0x260D:
-                    f.write(f"VID: 0x{d.vid:04X}, PID: 0x{d.pid:04X}, UP: 0x{d.usage_page:04X}, In: {d.input_len}, Out: {d.output_len}\n")
-        subprocess.Popen(["notepad.exe", path])
-    except Exception:
-        pass
-
-# ===========================================================================
-# 图标绘制
+# 图标渲染
 # ===========================================================================
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
@@ -339,7 +297,8 @@ class BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
 
 class ICONINFO(ctypes.Structure):
-    _fields_ = [("fIcon", wt.BOOL), ("xHotspot", wt.DWORD), ("yHotspot", wt.DWORD), ("hbmMask", wt.HBITMAP), ("hbmColor", wt.HBITMAP)]
+    _fields_ = [("fIcon", wt.BOOL), ("xHotspot", wt.DWORD),
+                ("yHotspot", wt.DWORD), ("hbmMask", wt.HBITMAP), ("hbmColor", wt.HBITMAP)]
 
 gdi32.CreateCompatibleDC.restype = wt.HDC
 gdi32.CreateDIBSection.restype = wt.HBITMAP
@@ -383,7 +342,7 @@ def make_battery_icon(level: Optional[int], light: bool, charging: bool = False,
         radius = 12.0 * s
         thick = max(2, int(round(4 * s)))
 
-        track = (170, 170, 170) if level is None else (95, 98, 105)
+        track = (175, 175, 175) if level is None else (95, 98, 105)
         pen_track = _ring_pen(track, thick)
         gdi32.SelectObject(memdc, pen_track)
         gdi32.SelectObject(memdc, gdi32.GetStockObject(5))
@@ -445,7 +404,8 @@ def make_battery_icon(level: Optional[int], light: bool, charging: bool = False,
         hbm_small = gdi32.CreateDIBSection(memdc, ctypes.byref(bmi2), 0, ctypes.byref(bits2), None, 0)
         ctypes.memmove(bits2, bytes(small), len(small))
 
-        mask = gdi32.CreateBitmap(size, size, 1, 1, None)
+        mask_bytes = bytes([0] * ((size + 31) // 32 * 4 * size))
+        mask = gdi32.CreateBitmap(size, size, 1, 1, mask_bytes)
         ii = ICONINFO(fIcon=1, xHotspot=0, yHotspot=0, hbmMask=mask, hbmColor=hbm_small)
         icon = user32.CreateIconIndirect(ctypes.byref(ii))
         gdi32.DeleteObject(mask)
@@ -487,7 +447,7 @@ def set_round_region(hwnd: int, w: int, h: int, radius: int = 24) -> None:
         pass
 
 class Panel:
-    LW, LH = 560, 399
+    LW, LH = 560, 420
 
     def _f(self, size, bold=False):
         return (FONT, -int(round(size * self.S)), "bold" if bold else "normal")
@@ -506,7 +466,7 @@ class Panel:
         self.cv.bind("<Button-1>", self._on_press)
         self.cv.bind("<B1-Motion>", self._on_drag)
         self.cv.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
-        self.root.bind("<Escape>", lambda e: self.hide())
+        self.root.bind("<Escape>", lambda e: self.minimize_to_tray())
         self._drag = None
         self.root.update_idletasks()
         set_round_region(self.root.winfo_id(), self.W, self.H, int(28 * self.S))
@@ -542,6 +502,11 @@ class Panel:
     def hide(self):
         self.root.withdraw()
 
+    def minimize_to_tray(self):
+        self.hide()
+        if self.app.tray:
+            self.app.tray.notify("已最小化到托盘！\n若任务栏未显示，请点击右下角『^』查看图标。", "达尔优 AE6 V2")
+
     DSH_BG = (27, 27, 28)
     DSH_CARD = (33, 33, 35)
     DSH_BORDER = (48, 49, 54)
@@ -566,8 +531,7 @@ class Panel:
         cv.create_text(x1 + 18, y1 + 22, text=r.name, anchor="w",
                        fill=_rgb(self.DSH_TEXT), font=self._f(13, True))
 
-        status_text = STATUS_TEXT.get(r.status, "使用中")
-        line_desc = f"{r.detail} · {status_text}" if r.ok else r.detail
+        line_desc = f"{r.detail}" if r.ok else r.detail
         cv.create_text(x1 + 18, y1 + 46, text=line_desc, anchor="w",
                        fill=_rgb(self.DSH_SUB), font=self._f(9))
 
@@ -593,35 +557,30 @@ class Panel:
         cv.create_text(30, 34, text="外设电量", anchor="w", fill=_rgb(self.DSH_TEXT), font=self._f(16, True))
         cv.create_text(30, 56, text="2.4G 无线外设 · 达尔优 AE6 V2 监控", anchor="w", fill=_rgb(self.DSH_SUB), font=self._f(9))
 
-        # 右上角最小化到托盘按钮
         cv.create_text(W - 30, 30, text="✕", fill=_rgb(self.DSH_SUB), font=self._f(11), tags=("btn_close",))
-        cv.tag_bind("btn_close", "<Button-1>", lambda e: self.hide())
+        cv.tag_bind("btn_close", "<Button-1>", lambda e: self.minimize_to_tray())
         cv.tag_bind("btn_close", "<Enter>", lambda e: cv.configure(cursor="hand2"))
         cv.tag_bind("btn_close", "<Leave>", lambda e: cv.configure(cursor=""))
 
+        cv.create_text(24, 235, text="提示：最小化后若在任务栏未直接看到，请在右下角『^』隐藏图标中查找并拖出",
+                       anchor="w", fill=_rgb(self.DSH_MUTED), font=self._f(8))
+
         stamp = time.strftime("%H:%M:%S", time.localtime(r.ts)) if r.ts else "--:--"
-        cv.create_text(24, 372, text=f"上次更新: {stamp}", anchor="w", fill=_rgb(self.DSH_MUTED), font=self._f(9), tags=("btn_ref",))
+        cv.create_text(24, 385, text=f"上次更新: {stamp}", anchor="w", fill=_rgb(self.DSH_MUTED), font=self._f(9), tags=("btn_ref",))
         cv.tag_bind("btn_ref", "<Button-1>", lambda e: self.app.refresh())
 
-        # 诊断日志导出按钮
-        draw_round_rect(cv, 240, 360, 350, 384, 6, fill=_rgb(self.DSH_BTN), outline="")
-        cv.create_text(295, 372, text="导出排查日志", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_diag",))
-        cv.tag_bind("btn_diag", "<Button-1>", lambda e: export_desktop_log())
+        draw_round_rect(cv, 365, 372, 460, 398, 6, fill=_rgb(self.DSH_BTN), outline="")
+        cv.create_text(412, 385, text="最小化到托盘", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_min",))
+        cv.tag_bind("btn_min", "<Button-1>", lambda e: self.minimize_to_tray())
 
-        # 显式的最小化到托盘按钮
-        draw_round_rect(cv, 365, 360, 460, 384, 6, fill=_rgb(self.DSH_BTN), outline="")
-        cv.create_text(412, 372, text="最小化到托盘", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_min",))
-        cv.tag_bind("btn_min", "<Button-1>", lambda e: self.hide())
-
-        # 彻底退出按钮
-        draw_round_rect(cv, 475, 360, 536, 384, 6, fill=_rgb(self.DSH_BTN), outline="")
-        cv.create_text(505, 372, text="退出", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_quit",))
+        draw_round_rect(cv, 475, 372, 536, 398, 6, fill=_rgb(self.DSH_BTN), outline="")
+        cv.create_text(505, 385, text="退出", fill=_rgb(self.DSH_TEXT), font=self._f(9), tags=("btn_quit",))
         cv.tag_bind("btn_quit", "<Button-1>", lambda e: self.app.quit())
 
         cv.scale("all", 0, 0, self.S, self.S)
 
 # ===========================================================================
-# 托盘调度
+# 托盘调度与消息循环
 # ===========================================================================
 WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
@@ -684,6 +643,7 @@ class Tray:
         self.nid.szTip = "达尔优 AE6 V2: 侦测中..."
         shell32.Shell_NotifyIconW(0, ctypes.byref(self.nid))
 
+        self.sync_icons()
         user32.SetTimer(self.hwnd, 1, 3000, None)
 
         msg = wt.MSG()
@@ -691,6 +651,16 @@ class Tray:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
         self.app._stop = True
+
+    def notify(self, text: str, title: str = "达尔优 AE6 V2"):
+        if not self.nid:
+            return
+        self.nid.uFlags = 1 | 2 | 4 | 0x10
+        self.nid.szInfo = text[:255]
+        self.nid.szInfoTitle = title[:63]
+        self.nid.dwInfoFlags = 0x01
+        shell32.Shell_NotifyIconW(1, ctypes.byref(self.nid))
+        self.nid.uFlags = 1 | 2 | 4
 
     def sync_icons(self):
         r = self.app.snapshot().get("mouse")
@@ -736,7 +706,7 @@ class Tray:
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
 # ===========================================================================
-# 应用程序核心编排
+# 应用程序核心
 # ===========================================================================
 class TrayApp:
     def __init__(self):
