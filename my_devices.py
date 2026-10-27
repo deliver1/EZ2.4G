@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-外设电量 — 达尔优 AE6 V2 终极完整修复版
+外设电量 — 达尔优 AE6 V2 最终定版
+1. 修复充放电状态判断：rep[5]==2 为充电中，rep[5]==1 为放电中
+2. 修复单实例互斥与进程唤醒，彻底解决二次打开闪退、托盘冲突问题
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from typing import Optional
 UI_SCALE = 1.0
 
 # ===========================================================================
-# Win32 API 基础签名与 64 位安全声明
+# Win32 API 基础签名与 64 位指针安全声明
 # ===========================================================================
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -49,6 +51,8 @@ kernel32.GetOverlappedResult.argtypes = [wt.HANDLE, ctypes.c_void_p, ctypes.POIN
 kernel32.CancelIoEx.argtypes = [wt.HANDLE, ctypes.c_void_p]
 kernel32.GetModuleHandleW.restype = wt.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+kernel32.CreateMutexW.restype = wt.HANDLE
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
 
 
@@ -275,14 +279,13 @@ STATUS_TEXT = {
 
 
 # ===========================================================================
-# 达尔优通信驱动：校准真实字节
+# 达尔优通信驱动（校准：rep[5]==2 才是充电中，rep[5]==1 为放电中）
 # ===========================================================================
 def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
     cands = [d for d in ifaces if d.vid == 0x260D and d.pid in (0x1261, 0x1260, 0x04ED)]
     if not cands:
         return None
 
-    # 日志已验证 17 字节通道为 UP 0xFF02
     target_ifaces = [d for d in cands if d.usage_page == 0xFF02]
     if not target_ifaces:
         target_ifaces = [d for d in cands if d.usage_page != 0x01] or cands
@@ -309,12 +312,10 @@ def dareu_read(ifaces: list[HidIface]) -> Optional[Reading]:
                 if not rep or len(rep) < 7:
                     continue
 
-                # 验证 17 字节响应
                 if rep[0] == 0x08 and rep[1] == 0x04:
-                    # rep[5] 为充电状态：0x02 表示插线充电中
-                    is_charging = (rep[5] in (1, 2)) or (len(rep) > 7 and rep[7] != 0) or (d.pid == 0x1260)
-                    # rep[6] 为电量：0x5F = 95%[cite: 15]
-                    bat = rep[6]
+                    # rep[5] 严格判断：0x02 为插线充电中；0x01 为无线放电中[cite: 15]
+                    is_charging = (rep[5] == 2) or (d.pid == 0x1260)
+                    bat = rep[6]  # 真实电量百分比[cite: 15]
 
                     if 0 <= bat <= 100:
                         if is_charging:
@@ -360,7 +361,7 @@ def read_mouse(ifaces: list[HidIface]) -> Reading:
 
 
 # ===========================================================================
-# 图标渲染与 GDI 64位安全声明
+# 图标渲染与 GDI 64 位类型安全绑定
 # ===========================================================================
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [
@@ -636,8 +637,6 @@ class Panel:
 
     def minimize_to_tray(self):
         self.hide()
-        if self.app.tray:
-            self.app.tray.notify("已最小化到托盘！\n若未看到，请点击任务栏右下角『^』查看。", "达尔优 AE6 V2")
 
     DSH_BG = (27, 27, 28)
     DSH_CARD = (33, 33, 35)
@@ -720,11 +719,12 @@ class Panel:
 
 
 # ===========================================================================
-# 托盘调度与消息循环（完整 64 位 API 声明）
+# 托盘调度与消息循环（64位安全 + 单实例唤醒支持）
 # ===========================================================================
 WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
 WM_APP_REFRESH = WM_APP + 2
+WM_APP_SHOW = WM_APP + 3
 WM_TIMER = 0x0113
 WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
@@ -794,6 +794,10 @@ user32.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT
 user32.GetMessageW.restype = wt.BOOL
 user32.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
 user32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
+user32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
+user32.FindWindowW.restype = wt.HWND
 shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 shell32.Shell_NotifyIconW.restype = wt.BOOL
 
@@ -842,16 +846,6 @@ class Tray:
             user32.DispatchMessageW(ctypes.byref(msg))
         self.app._stop = True
 
-    def notify(self, text: str, title: str = "达尔优 AE6 V2"):
-        if not self.nid:
-            return
-        self.nid.uFlags = 1 | 2 | 4 | 0x10
-        self.nid.szInfo = text[:255]
-        self.nid.szInfoTitle = title[:63]
-        self.nid.dwInfoFlags = 0x01
-        shell32.Shell_NotifyIconW(1, ctypes.byref(self.nid))
-        self.nid.uFlags = 1 | 2 | 4
-
     def sync_icons(self):
         r = self.app.snapshot().get("mouse")
         lvl = r.level if (r and r.ok) else None
@@ -881,10 +875,11 @@ class Tray:
     def _proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAYICON:
             cmd = lparam & 0xFFFF
-            if cmd == WM_LBUTTONUP:
+            if cmd in (WM_LBUTTONUP, WM_RBUTTONUP):
                 self.app.request_show()
-            elif cmd == WM_RBUTTONUP:
-                self.app.refresh()
+            return 0
+        if msg == WM_APP_SHOW:
+            self.app.request_show()
             return 0
         if msg == WM_TIMER:
             self.app.refresh()
@@ -984,6 +979,15 @@ class TrayApp:
 
 def main():
     user32.SetProcessDPIAware()
+
+    # 单实例互斥保护：如果已经运行，直接激活已有的窗口并退出当前进程
+    mutex = kernel32.CreateMutexW(None, False, "Local\\BatteryTrayDareu_Mutex")
+    if ctypes.get_last_error() == 183 and mutex:
+        hwnd = user32.FindWindowW("BatteryTrayDareu", None)
+        if hwnd:
+            user32.PostMessageW(hwnd, WM_APP_SHOW, 0, 0)
+        return
+
     app = TrayApp()
     app.run()
 
